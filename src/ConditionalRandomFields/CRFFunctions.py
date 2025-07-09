@@ -2,225 +2,275 @@ import pandas as pd
 import numpy as np
 import spacy
 import itertools
+import logging
+import random
+import datetime
+import ast
+from src.ConditionalRandomFields.FeatureFunctions import FeatureFunctions
 
 nlp = spacy.load("en_core_web_md")
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+#PYTHONUNBUFFERED=1 python -m unittest -b tests/test_train.py
 
 class Augment: #MARK: Augmentation
-    def __init__(self, data):
-        self.data = pd.DataFrame(data)
+    def __init__(self, events_path="data/training-events.csv", predicate_path="data/predicate_phrases.csv"):
+        self.events_path = events_path
+        self.predicate_path = predicate_path
+        self.raw_events = pd.read_csv(events_path)
+        self.predicate_data = pd.read_csv(predicate_path)
+        logger.info(f"Data loaded from {events_path} and {predicate_path}")
 
-    def process_labels(self):
-        self.data["task"] = self.data["task"].apply(lambda x: x.split(" "))
-        self.data["task"] = self.data["task"].apply(lambda x: [label.replace(label, "T") for label in x])
+        self.data = pd.DataFrame(columns=["full_text", "event", "start_time", "end_time", "date", "predicate", "sequence"])
 
-        self.data["time"] = self.data["time"].apply(lambda x: x.replace(x, "TM"))
+    def add_row(self, event, start_time, end_time, date, predicate=None):
+        if "-" in event:
+            event = event.replace("-", " "   )
+        if "'" in event:
+            event = event.replace("'", "")
+        if "/" in event:
+            event = event.replace("/", " ")
+        new_row = pd.DataFrame({
+            "full_text": [""],
+            "event": [event], 
+            "start_time": [start_time], 
+            "end_time": [end_time],
+            "date": [date],
+            "predicate": [predicate],
+            "sequence": [""]
+        })
+        self.data = pd.concat([self.data, new_row], ignore_index=True)
 
-        self.data["date"] = self.data["date"].apply(lambda x: x.split(" "))
-        self.data["date"] = self.data["date"].apply(lambda x: [label.replace(label, "D") for label in x])
+    def split_events(self):
+        for index, row in self.raw_events.iterrows():
+            try:
+                info = ast.literal_eval(row["events"])
+                for i, item in enumerate(info):
+                    if item[3] == "":
+                        self.add_row(item[0], item[1], item[2], "today")
+                    else:
+                        self.add_row(item[0], item[1], item[2], item[3])
+            except Exception as e:
+                logger.error(f"Error processing events in row {index}: {e}")
+                continue
 
-    def fillers(self, num_data=1000):
-        random_fillers = ["um", "like", "basically", "you know", "I guess", "I think", "so", "let's see"]
-        additionals = []
-        for i in range(num_data):
-            filler = np.random.choice(random_fillers)
-            input = np.random.choice(self.data)
-            text = input["text"]
-            random_index = np.random.choice(0, len(text))
-            input["text"] = text[random_index:] + " " + filler + " " + text[:random_index]
-            additionals.append(input)
-        self.data = pd.concat([self.data, pd.DataFrame(additionals)], ignore_index=True)
+    def concat_predicates(self):
+        for index, row in self.data.iterrows():
+            event = row["event"]
+            random_fix = random.choice(["prefix", "suffix"])
+            random_phrase = random.choice(self.predicate_data[random_fix])
+            if "-" in random_phrase:
+                random_phrase = random_phrase.replace("-", " ")
+            if "'" in random_phrase:
+                random_phrase = random_phrase.replace("'", "")
 
-    def random_time(self): # -> additional_tasks
-        random_time = np.random.randint(0, 12)
-        random_minutes = np.random.randint(0, 60)
-        random_am_pm = np.random.choice(["AM", "PM"])
-        return f"{random_time}:{random_minutes:02d} {random_am_pm}"
+            if random_phrase:
+                if random_fix == "prefix":
+                    self.data.at[index, "predicate"] = random_phrase
+                    self.data.at[index, "full_text"] = f"{random_phrase} {event} on {row['date']} from {row['start_time']} to {row['end_time']}"
+                else:
+                    self.data.at[index, "predicate"] = random_phrase
+                    self.data.at[index, "full_text"] = f"{event} {random_phrase} on {row['date']} from {row['start_time']} to {row['end_time']}"
+
+    def store_sequences(self):
+        for index, row in self.data.iterrows():
+            full_text_tokens = row["full_text"].split(" ")
+            sequence = []
+            for token in full_text_tokens:
+                if token.lower() in str(row["predicate"].lower()):
+                    sequence.append("O")
+                    continue
+
+                elif token.lower() in str(row["event"].lower()):
+                    sequence.append("T")
+                    continue
+
+                elif token.lower() in str(row["date"].lower()):
+                    sequence.append("D")
+                    continue
+
+                elif token.lower() in str(row["start_time"].lower()) or str(token.lower() in row["end_time"].lower()):
+                    sequence.append("TM")
+                    continue
+                else:
+                    sequence.append("O")
+
+            if len(sequence) != len(full_text_tokens):
+                logger.error(f"Sequence length mismatch at index {index}: {len(sequence)} vs {len(full_text_tokens)}")
+                return None
+            self.data.at[index, "sequence"] = " ".join(sequence)
     
-    def random_date(self): # -> additional_tasks
-        random_day = np.random.randint(1, 29)
-        random_month = np.random.choice(["January", "February", "March", "April", "May", "June", 
-                                         "July", "August", "September", "October", "November", "December"])
-        return f"{random_month} {random_day}"
-
-    def additional_tasks(self, num_data=2000):
-        orders = ["remind me to", "please input", "I need to", "put", "I have to", "I want to", "make sure that I", 
-                  "can you have me"]
-        tasks = [
-            "clean the house", "buy groceries", "finish data augmentation", "go to the gym",
-            "read up on the algorithms book", "work on calculus homework", "work", "wedding", "church service",
-            "go to DT", "read bible", "morning prayer", "hangout with friends", "dinner with Dad", "lunch with mom",
-            "research new data algorithms", "prepare for presentation", "write essay for english", "free time", 
-            "bing watch series", "clean the kitchen", "wash teh car", "buy tickets for the concert", "biuld the CRF model",
-            "organize my room", "PBL meeting", "United Hacks hackathon", "print new tools for mom"]
-        
-        additionals = []
-        for i in range(num_data):
-            order = np.random.choice(orders)
-            task = np.random.choice(tasks)
-            time = self.random_time()
-            date = self.random_date()
-            text = f"{order} {task} at {time} on {date}"
-            input = {"text": text, "task": task, "time": time, "date": date}
-            additionals.append(input)
-        
-        return pd.DataFrame(additionals)
-
+    def save_data(self, filename="data/aug_TIM.csv"):
+        try:
+            self.data.to_csv(filename, index=False)
+            logger.info(f"Data saved to {filename}")
+        except Exception as e:
+            logger.error(f"Error saving data to CSV: {e}")
+            raise
+                    
 class Process: #MARK: Processing 
-    def __init__(self, raw_labels, labels, label_length, feature_text): 
+    def __init__(self, label, label_length, feature_text): 
         self.nlp = nlp
-        self.raw_labels = raw_labels
-        self.labels = labels
+        self.label = label
         self.label_length = label_length
         self.feature_text = feature_text
-    
-    def get_sequences(self):
-        sequences = list(itertools.product(self.labels, repeat=self.label_length))
+
+    def validate_lengths(self, sequences):
+        for seq in sequences:
+            if len(seq) != self.label_length:
+                logger.error(f"Sequence length mismatch: {len(seq)} vs {self.label_length}")
+                return False
+        return True
+
+    def get_sequences(self, max_permutations=None):
+        if not max_permutations:
+            max_permutations = 1000
+
+        sequences_iter = itertools.product(self.label, repeat=self.label_length)
+        sequences = list(itertools.islice(sequences_iter, max_permutations))
+        random.shuffle(sequences)
+
+        if not self.validate_lengths(sequences):
+            logger.error("Validation failed: Sequence lengths do not match the expected label length.")
+            return None
         return sequences
-    
-    def split_true(self):
-        true_sequence = []
-        self.raw_labels = [label.split(" ") for label in self.raw_labels]
-        for i, label in enumerate(self.raw_labels):
-            label.split(" ")
-            if i == 0:
-                true_sequence.append(("T", label))
-            elif i == 1:
-                true_sequence.append(("TM", label))
-            elif i == 2:
-                true_sequence.append(("D", label))
-        return true_sequence
-    
-    def true_sequence(self):
-        true_split = self.split_true()
-        label_sequence = []
-        for word in self.feature_text.split(" "):
-            found = False
-            for label, raw_label in true_split:
-                if word in raw_label:
-                    label_sequence.append(label)
-                    found = True
-                    break
-                else:
-                    continue
-            if not found:
-                label_sequence.append("O")
-        return label_sequence
         
     def get_tags(self):
         doc = nlp(self.feature_text)
-        tags = [token.tag_ for token in doc]
+        tags = [token.pos_ for token in doc]
         return tags
-
-
-class FeatureFunctions: #MARK: Functions
-    def __init__(self, tags, sequence, weights):
-        self.tags = tags # POS tags
-        self.sequence = sequence # Sequence of labels T for task, D for time or date, or O for irrelevant
-        self.weights = weights
-
-    def f1(self, tag, label, i): #Task
-        if tag == "VERB" and label == "T":
-            if (self.tags[i+1] == "DET" or self.tags[i+1 == "NOUN"]) and i < len(self.tags) - 1:
-                return 1
-        return 0
-    def f2(self, tag, label, i): #Date
-        if tag == "NOUN" and label == "D" and self.tags[i-1] == "ADP" and i > 0:
-            return 1
-        return 0
-    
-    def f3(self, tag, label, i): #Date
-        if tag == "PROPN" and self.tags[i-1] == "ADP" and i > 0:
-            if (self.tags[i+1] == "NOUN" or self.tags[i+1] == "NUM") and label == "D" and i < len(self.tags) - 1:
-                return 1
-        return 0
-
-    def f4(self, tag, label, i): #Task
-        if tag == "PART" and label == "O":
-            if (self.tags[i+1]== "VERB" and label == "T") and i < len(self.tags) - 1:
-                return 1
-        return 0
-    
-    def f5(self, tag, label, i): #Task
-        if (tag == "VERB" or tag == "NOUN") and label == "T":
-            if (self.tags[i+1] == "ADP" or self.tags[i+1] == "NOUN") and self.sequence[i+1] == "T" and i < len(self.tags) - 1:
-                return 1
-        return 0
-    
-    def f6(self, tag, label, i): #Task
-        if tag == "ADP" and label == "T":
-            if self.tags[i+1] == "PROPN" or self.tags[i+1] == "NOUN" and i < len(self.tags) - 1:
-                if self.sequence[i+1] == "T":
-                    return 1
-        return 0
-    
-    #TODO: Change for more feature functions
-    def call_features(self):
-        for i, (tag, label) in enumerate(zip(self.tags, self.sequence)):
-            output1 = self.f1(tag, label, i) * self.weights[0]
-            output2 = self.f2(tag, label, i) * self.weights[1]
-            output3 = self.f3(tag, label, i) * self.weights[2]
-            output4 = self.f4(tag, label, i) * self.weights[3]
-            output5 = self.f5(tag, label, i) * self.weights[4]
-            output6 = self.f6(tag, label, i) * self.weights[5]
-
-        return [output1, output2, output3, output4, output5, output6]
-        
 class Score: #MARK: Scoring
-    def __init__(self, possible_labels, true_label, weights): 
+    def __init__(self, possible_labels, true_label, weights, feature_text): 
         self.possible_labels = possible_labels
         self.true_label = true_label
         self.weights = weights
+        self.feature_text = feature_text
         self.z = None
+
+    def score_sequences(self, tags):
+        scores = []
+        try:
+            for seq in self.possible_labels:
+                scorer = FeatureFunctions(tags, seq, self.weights, self.feature_text)
+                outputs = scorer.call_features(is_training=False)
+                if outputs is not None:
+                    score = np.sum(outputs)
+                    scores.append(score)
+            return scores
+        except Exception as e:
+            logger.error(f"Error scoring sequences: {e}")
+            return None
     
-    
-    def z_out(self, true_score, sequences, tags):
+    def z_out(self, tags):
         total = 0
         
-        for seq in sequences:
-            scorer = FeatureFunctions(tags, seq, self.weights)
-            outputs = scorer.call_features()
-            for i, output in enumerate(outputs):
-                weighted_sum = np.exp(output * self.weights[i])
-                total += weighted_sum
+        try:
+            for seq in self.possible_labels:
+                scorer = FeatureFunctions(tags, seq, self.weights, self.feature_text)
+                outputs = scorer.call_features()
+                if outputs is not None:
+                    score = np.sum(outputs)
+                    total += np.exp(score)
+                
+        except Exception as e:
+            logger.error(f"Error calculating Z value: {e}")
+            return None
 
-        self.z = np.exp(true_score) / total
+        self.z = total
+        if self.z is None or not np.isfinite(self.z):
+            logger.error("Z value is not set or invalid. Returning small default value.")
+            self.z = 1e-10
+
         return self.z
     
-    def single_probability(self, sequence, tags, weights):
-        scorer = FeatureFunctions(tags, sequence, self.weights)
-        outputs = scorer.call_features()
-        weighted_sum = 0
-        for i, output in enumerate(outputs):
-            weighted_sum += np.exp(output * weights[i])
+    def probability(self, true_scores, z_out=None):
+        if self.z is None:
+            self.z = z_out
+        if self.z is None or not np.isfinite(self.z):
+            logger.error("Z value is not set or invalid. Please call z_out() before calculating probability.")
+            return 1e-10
         
-        return weighted_sum / self.z if self.z is not None else 0
-    
-class BackProp: #MARK: Backpropagation
-    def __init__(self, weights, tags, sequences, z_out, learning_rate=0.01):
+        try:
+            weighted_sum = np.sum(true_scores)
+            log_prob = np.exp(weighted_sum) / self.z
+            
+            return max(log_prob, 1e-10) 
+        except Exception as e:
+            logger.error(f"Error calculating single probability: {e}")
+            return 1e-10
+        
+class BackProp: #MARK: BackProp
+    def __init__(self, weights, tags, sequences, feature_text="", learning_rate=0.008):
         self.weights = weights
         self.tags = tags
         self.sequences = sequences
         self.learning_rate = learning_rate
+        self.feature_text = feature_text
         
-        self.z_out = z_out
-
     def loss(self, true_probability):
-        loss = -np.log(true_probability)
-        return loss
-
-    def gradient(self, true_score):
+        if true_probability is None or true_probability <= 0:
+            logger.warning(f"Invalid true_probability: {true_probability}, using small value")
+            true_probability = 1e-10
+        
+        try:
+            prob = max(true_probability, 1e-10)
+            loss = -np.log(prob)
+            
+            if not np.isfinite(loss):
+                logger.warning(f"Invalid loss calculated: {loss}, using default")
+                loss = 10.0
+                
+            return round(float(loss), 4)
+        except Exception as e:
+            logger.error(f"Error calculating loss: {e}")
+            return 10.0
+    
+    def gradient(self, true_scores, scorer: Score):
         gradients = []
-        for seq in self.sequences:
-            self.scorer = FeatureFunctions(self.tags, seq, self.weights)
-            outputs = self.scorer.call_features()
-            for i, output in enumerate(outputs):
-                gradient = (output * self.z_out) - true_score
-                gradients.append(gradient)
 
-        return gradients
+        expected_f = [0.0] * len(self.weights)  
+        for seq in self.sequences:
+            feature_functions = FeatureFunctions(self.tags, seq, self.weights, self.feature_text)
+            scores = feature_functions.call_features()
+            score_probability = scorer.probability(scores)
+            
+            if scores is not None and score_probability is not None:
+                if np.isfinite(score_probability) and score_probability > 0:
+                    for i, feature_output in enumerate(scores):
+                        if i < len(expected_f) and np.isfinite(feature_output):
+                            expected_f[i] += float(feature_output) * float(score_probability)
+                else:
+                    logger.warning(f"Invalid score_probability: {score_probability}")
+
+        for i in range(len(self.weights)):
+            if i < len(true_scores):
+                gradient = expected_f[i] - float(true_scores[i])
+                gradients.append(gradient)
+            else:
+                gradients.append(0.0)
+
+        return np.clip(gradients, -1, 1) 
+    #MARK: HP
+    def normalize_weights(self, l2_strength=0.001): #0.001
+        try:
+            l2_norm = np.sqrt(sum(w**2 for w in self.weights))
+            
+            if l2_norm > 0:
+                for i in range(len(self.weights)):
+                    self.weights[i] = self.weights[i] / (1 + l2_strength * l2_norm)
+            
+            for i in range(len(self.weights)):
+                self.weights[i] = np.clip(self.weights[i], -0.5, 0.5)
+            
+            return self.weights
+        except Exception as e:
+            logger.error(f"Error normalizing weights: {e}")
+            return self.weights
     
     def update_weights(self, gradients):
         for i in range(len(self.weights)):
             self.weights[i] -= self.learning_rate * gradients[i]
 
+        self.weights = self.normalize_weights()
         return self.weights
