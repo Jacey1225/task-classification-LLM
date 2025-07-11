@@ -5,6 +5,7 @@ import numpy as np
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# 🧪 ✅ ❌
 class FeatureFunctions:
     def __init__(self, tags, sequence, weights, feature_text):
         self.tags = tags
@@ -45,12 +46,12 @@ class FeatureFunctions:
         if i > 0 and i < len(self.tags) - 1:
             if tag in ["NOUN", "PROPN", "VERB"] and self.tags[i-1] in ["VERB", "ADP", "ADJ", "ADV", "PRON"]:
                 if label == "T":
-                    return 1
+                    return 2
         return 0
 
-    def f9(self, tag, label, i): #TIME 🧪 
+    def f9(self, tag, label, i): #TIME 🧪
         if i >= 2 and i < len(self.tags) - 1:  
-            if label == "TM" or self.sequence[i-1] == "TM" or self.sequence[i-2] == "TM":
+            if label == "TM" and self.sequence[i-2] == "TM":
                 return 1
         return 0
 
@@ -58,7 +59,7 @@ class FeatureFunctions:
         if i == 0 or (i < len(self.tags) - 1 and i + 1 < len(self.sequence)):  
             if tag in ["ADP", "PRON", "PROPN", "VERB", "NOUN"] and i + 1 < len(self.tags) and self.tags[i+1] in ["ADP", "PRON", "PROPN", "VERB", "NOUN"]:
                 if label == "O" and self.sequence[i+1] == "O":
-                    return 1
+                    return 1.5
         return 0
     
     def f11(self, tag, label, i): #DATE ✅ 
@@ -71,18 +72,18 @@ class FeatureFunctions:
     def f13(self, tag, label, i): #TASK 🧪
         if i > 0 and i < len(self.tags) - 1:
             if tag in ["NOUN", "PROPN", "VERB"] and self.tags[i-1] == "VERB":
-                if label == "T" or self.sequence[i-1] == "T":
-                    return 1
+                if label == "T" and self.sequence[i-1] == "T":
+                    return 2
         return 0
     
-    def f14(self, tag, label, i): #FILLER ✅
-        if i < len(self.tags) - 1:
+    def f14(self, tag, label, i): #FILLER + TASK 🧪
+        if i < len(self.tags) - 2:
             if tag in ["ADP", "PRON", "PROPN", "NOUN"]:
-                if label == "O" and self.sequence[i+1] == "O": 
-                    return 1
+                if label == "O" and self.sequence[i+1] == "O" and self.sequence[i+2] == "T": 
+                    return 1.5
         return 0
     
-    def dropout(self, drop_rate=0.35):
+    def dropout(self, drop_rate=0.2):
         if self.weights is None or len(self.weights) == 0:
             logger.warning("No weights available for dropout")
             return self.weights
